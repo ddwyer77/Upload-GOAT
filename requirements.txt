@@ -1,0 +1,4 @@
+requests>=2.31.0
+python-dotenv>=1.0.1
+PyQt5>=5.15.2
+requests-toolbelt>=0.10.1 
