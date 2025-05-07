@@ -1,0 +1,82 @@
+Upload GOAT — Application Overview
+
+1. Project Layout
+• .gitignore
+  • ignores __pycache__/, *.py[cod], .env*, logs/
+• .env.example
+  • API_KEY=pk_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+• requirements.txt
+  • requests>=2.31.0
+  • python-dotenv>=1.0.1
+  • PyQt5>=5.15.2
+  • requests-toolbelt>=0.10.1
+• uploader.py
+  • UploadPostClient: wrapper around Upload-Post API
+• main.py
+  • PyQt5 GUI with multi-user panels, single upload & scheduler
+• logs/upload_log.json
+  • line-delimited JSON log of upload attempts
+
+2. Tech Stack
+• Python 3.11
+• PyQt5 for UI (widgets, layouts, dialogs, QThread)
+• requests + requests-toolbelt for HTTP and multipart progress
+• python-dotenv for loading API_KEY from .env
+• JSON logging via built-in modules
+
+3. Configuration
+• Copy .env.example → .env, paste your live API key
+• Optionally pre-fills API key field in the UI
+
+4. uploader.py (API Wrapper)
+• ENDPOINT = https://api.upload-post.com/api/upload
+• Uses header Authorization: Apikey <API_KEY>
+• upload_video(video_path, caption, user, platforms=None, progress_callback=None)
+  - Builds MultipartEncoder payload with title, user, platform[], video file
+  - Wraps in MultipartEncoderMonitor when progress_callback provided
+  - Raises RuntimeError on HTTP 401, re-raises other HTTP errors
+  - Returns parsed JSON response
+
+5. main.py (GUI & Logic)
+• Loads .env for ENV_API_KEY but allows pasting any API key at runtime
+• SchedulerWorker (QThread)
+  - Signals: update_status(str), finished_all()
+  - Takes tasks [{path, caption, scheduled_time}], waits until each time, uploads via UploadPostClient
+• UserPanel (per Upload-Post username)
+  - Username field, single-upload panel (file picker, caption, progress bar, upload button)
+  - Scheduler panel (toggle checkbox, folder selector, table of videos with caption and QDateTimeEdit, refresh & start buttons)
+  - Internal methods: _browse_file, _do_upload, _toggle_scheduler_panel, _populate_scheduler_table, _refresh_schedule_status, _start_scheduling, _update_progress, _log_result
+• MainWindow
+  - Title: Upload GOAT / subtext: a tool by ClipmodeGo
+  - Top row: API Key field, Add User, Remove User buttons
+  - Scrollable container of UserPanel instances (multi-profile support)
+  - _add_user_panel and _remove_user_panel manage dynamic panels
+
+6. Runtime Flow
+• Launch → paste API key or pre-filled from .env
+• Add User → creates a panel for another Upload-Post profile
+• Single-upload mode: pick file, enter caption & username, click Upload → progress & status, logs result
+• Scheduler mode: enable scheduler, select folder, fill captions & times, click Start → table shows "Videos scheduled for upload" and time remaining updates, uploads fire at scheduled times in background
+
+7. Error Handling & Feedback
+• Validation dialogs for missing API key, username, file, caption
+• HTTP 401 → clear "Upload-Post API Unauthorized" message
+• Other errors → detailed traceback dialog
+• Status labels & progress bars in each panel
+
+8. How to Run
+```bash
+cp .env.example .env
+# edit .env, insert API_KEY
+pip install -r requirements.txt
+python main.py
+```
+
+9. Next-Step Ideas
+• Batch retry logic for failures
+• Thumbnail preview & drag-n-drop reorder in scheduler table
+• Export/import CSV for scheduled tasks
+• Automatic video size checks & ffmpeg transcoding
+• Standalone executables via PyInstaller (.app/.exe)
+• OAuth integration to fetch Upload-Post profiles dynamically
+• Dashboard UI showing past logs with filters and statistics 

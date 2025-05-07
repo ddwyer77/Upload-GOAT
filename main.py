@@ -19,6 +19,8 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem,
     QDateTimeEdit,
     QCheckBox,
+    QScrollArea,
+    QFrame,
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from dotenv import load_dotenv
@@ -65,47 +67,20 @@ class SchedulerWorker(QThread):
                 self.update_status.emit(f"Error {path.name}: {ex}")
         self.finished_all.emit()
 
-class MainWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("TikTok Uploader")
-        # Set initial window size; allow height to adjust automatically
-        self.resize(450, 320)
-        self.setMinimumWidth(450)
+class UserPanel(QWidget):
+    """Panel for a single Upload-Post user: single uploads and scheduling."""
+    def __init__(self, api_key_edit: QLineEdit, parent=None):
+        super().__init__(parent)
+        self.api_key_edit = api_key_edit
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout()
-        # App title and subtitle
-        title_lbl = QLabel("Upload GOAT")
-        title_lbl.setAlignment(Qt.AlignCenter)
-        title_lbl.setStyleSheet("font-size: 18pt; font-weight: bold;")
-        layout.addWidget(title_lbl)
-        subtitle_lbl = QLabel("a tool by ClipmodeGo")
-        subtitle_lbl.setAlignment(Qt.AlignCenter)
-        subtitle_lbl.setStyleSheet("font-size: 10pt; color: gray;")
-        layout.addWidget(subtitle_lbl)
-
-        # Upload-Post API Key field
-        api_label = QLabel("Upload-Post API Key")
-        layout.addWidget(api_label)
-        self.api_key_edit = QLineEdit()
-        self.api_key_edit.setPlaceholderText("Paste your API Key here")
-        # Pre-fill from environment if available
-        if ENV_API_KEY:
-            self.api_key_edit.setText(ENV_API_KEY)
-        layout.addWidget(self.api_key_edit)
-
-        # Upload-Post Username (global)
-        user_label = QLabel("Upload-Post Username")
-        layout.addWidget(user_label)
+        layout = QVBoxLayout(self)
+        # Username
+        layout.addWidget(QLabel("Upload-Post Username"))
         self.user_edit = QLineEdit()
-        self.user_edit.setPlaceholderText("Upload-Post Username")
         layout.addWidget(self.user_edit)
 
-        # Container for single-upload UI
-        self.upload_panel = QWidget()
-        upload_layout = QVBoxLayout(self.upload_panel)
         # File picker
         file_layout = QHBoxLayout()
         self.file_edit = QLineEdit()
@@ -114,64 +89,52 @@ class MainWindow(QWidget):
         browse_btn = QPushButton("Browse")
         browse_btn.clicked.connect(self._browse_file)
         file_layout.addWidget(browse_btn)
-        upload_layout.addLayout(file_layout)
+        layout.addLayout(file_layout)
 
-        # Caption field
+        # Caption
         self.caption_edit = QLineEdit()
         self.caption_edit.setPlaceholderText("Caption (≤50 words)")
-        upload_layout.addWidget(self.caption_edit)
+        layout.addWidget(self.caption_edit)
 
-        # Status label
+        # Status & Progress
         self.status_lbl = QLabel("")
-        upload_layout.addWidget(self.status_lbl)
-
-        # Progress bar (hidden until upload starts)
+        layout.addWidget(self.status_lbl)
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0,100)
         self.progress_bar.setVisible(False)
-        upload_layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_bar)
 
         # Upload button
-        self.upload_btn = QPushButton("Upload to TikTok")
-        self.upload_btn.clicked.connect(self._do_upload)
-        upload_layout.addWidget(self.upload_btn)
-        # Add upload_panel to main layout
-        layout.addWidget(self.upload_panel)
+        upload_btn = QPushButton("Upload to TikTok")
+        upload_btn.clicked.connect(self._do_upload)
+        layout.addWidget(upload_btn)
 
         # Scheduler toggle
         self.scheduler_checkbox = QCheckBox("Enable Scheduler")
         self.scheduler_checkbox.toggled.connect(self._toggle_scheduler_panel)
         layout.addWidget(self.scheduler_checkbox)
 
-        # Scheduler panel (collapsed by default)
-        self.scheduler_panel = QWidget()
+        # Scheduler panel
+        self.scheduler_panel = QFrame()
         sched_layout = QVBoxLayout(self.scheduler_panel)
-        # Folder selector for batch uploads
         self.select_folder_btn = QPushButton("Select Folder for Scheduler")
         self.select_folder_btn.clicked.connect(self._populate_scheduler_table)
         sched_layout.addWidget(self.select_folder_btn)
-        # Table of scheduled uploads
-        self.scheduler_table = QTableWidget(0, 4)
-        self.scheduler_table.setHorizontalHeaderLabels(["Video File", "Caption", "Scheduled Time", "Time Remaining"])
-        self.scheduler_table.horizontalHeader().setStretchLastSection(True)
+        self.scheduler_table = QTableWidget(0,4)
+        self.scheduler_table.setHorizontalHeaderLabels(["Video","Caption","Time","Remaining"])
         sched_layout.addWidget(self.scheduler_table)
-        # Status label for scheduler
         self.schedule_status_lbl = QLabel("")
         sched_layout.addWidget(self.schedule_status_lbl)
-        # Refresh and start buttons
-        btn_row = QHBoxLayout()
         self.refresh_btn = QPushButton("Refresh Schedule")
         self.refresh_btn.clicked.connect(self._refresh_schedule_status)
         self.start_schedule_btn = QPushButton("Start Scheduling")
         self.start_schedule_btn.clicked.connect(self._start_scheduling)
-        btn_row.addWidget(self.refresh_btn)
-        btn_row.addWidget(self.start_schedule_btn)
-        sched_layout.addLayout(btn_row)
+        row = QHBoxLayout()
+        row.addWidget(self.refresh_btn)
+        row.addWidget(self.start_schedule_btn)
+        sched_layout.addLayout(row)
         self.scheduler_panel.setVisible(False)
         layout.addWidget(self.scheduler_panel)
-
-        self.setLayout(layout)
 
     def _browse_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -270,7 +233,6 @@ class MainWindow(QWidget):
 
     def _toggle_scheduler_panel(self, checked: bool):
         # Show/hide scheduler panel and single-upload panel
-        self.upload_panel.setVisible(not checked)
         self.scheduler_panel.setVisible(checked)
         self.adjustSize()
 
@@ -345,6 +307,55 @@ class MainWindow(QWidget):
         self.scheduler_worker.update_status.connect(lambda msg: self.status_lbl.setText(msg))
         self.scheduler_worker.finished_all.connect(lambda: QMessageBox.information(self, "Done", "All scheduled uploads complete."))
         self.scheduler_worker.start()
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Upload GOAT")
+        self.resize(800,600)
+        self.user_panels = []  # track panels for dynamic add/remove
+        self._build_ui()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        # API Key and Add User controls
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("Upload-Post API Key"))
+        self.api_key_edit = QLineEdit()
+        top_row.addWidget(self.api_key_edit)
+        add_user_btn = QPushButton("Add User")
+        add_user_btn.clicked.connect(self._add_user_panel)
+        top_row.addWidget(add_user_btn)
+        remove_user_btn = QPushButton("Remove User")
+        remove_user_btn.clicked.connect(self._remove_user_panel)
+        top_row.addWidget(remove_user_btn)
+        main_layout.addLayout(top_row)
+
+        # Scroll area for multiple UserPanels
+        self.panels_container = QWidget()
+        self.panels_layout = QHBoxLayout(self.panels_container)
+        scroll = QScrollArea()
+        scroll.setWidget(self.panels_container)
+        scroll.setWidgetResizable(True)
+        main_layout.addWidget(scroll)
+
+        # Add initial panel
+        self._add_user_panel()
+
+    def _add_user_panel(self):
+        panel = UserPanel(self.api_key_edit)
+        self.user_panels.append(panel)
+        self.panels_layout.addWidget(panel)
+        panel.show()
+
+    def _remove_user_panel(self):
+        """Remove the most recently added user panel."""
+        if not self.user_panels:
+            return
+        panel = self.user_panels.pop()
+        self.panels_layout.removeWidget(panel)
+        panel.setParent(None)
+        panel.deleteLater()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
