@@ -1,0 +1,13 @@
+[Unit]
+Description=Upload-Post headless worker
+After=network-online.target
+
+[Service]
+User=pi
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/uploader-env/bin/python /home/pi/upload_worker.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target 

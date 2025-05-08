@@ -21,6 +21,8 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QScrollArea,
     QFrame,
+    QTabWidget,
+    QAbstractItemView,
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from dotenv import load_dotenv
@@ -30,6 +32,8 @@ from uploader import UploadPostClient
 # Optional: pre-fill API key from environment (won't block UI on missing env)
 load_dotenv()
 ENV_API_KEY = os.getenv("API_KEY", "")
+ENV_PI_IP = os.getenv("PI_IP", "")
+ENV_SSH_KEY = os.getenv("SSH_KEY", str(Path.home() / ".ssh/pi_upload"))
 
 class SchedulerWorker(QThread):
     """Worker thread to perform scheduled uploads at specified datetimes."""
@@ -67,11 +71,89 @@ class SchedulerWorker(QThread):
                 self.update_status.emit(f"Error {path.name}: {ex}")
         self.finished_all.emit()
 
+class LogsWorker(QThread):
+    """Worker thread to fetch Pi logs via SSH."""
+    logs_ready = pyqtSignal(list)
+
+    def __init__(self, pi_ip: str, ssh_key: str):
+        super().__init__()
+        self.pi_ip = pi_ip
+        self.ssh_key = ssh_key
+
+    def run(self):
+        import subprocess, json
+        cmd = f"ssh -i {self.ssh_key} pi@{self.pi_ip} journalctl -u upload-worker --since today --no-pager -o cat"
+        try:
+            text = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, universal_newlines=True)
+        except subprocess.CalledProcessError:
+            text = ""
+        rows = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                row = {
+                    "timestamp": data.get("timestamp", ""),
+                    "video": data.get("video", ""),
+                    "user": data.get("user", ""),
+                    "status": data.get("status", ""),
+                    "message": data.get("error", data.get("message", "")),
+                }
+            except Exception:
+                row = {
+                    "timestamp": "",
+                    "video": "",
+                    "user": "",
+                    "status": "",
+                    "message": line,
+                }
+            rows.append(row)
+        self.logs_ready.emit(rows)
+
+class SCPWorker(QThread):
+    """Worker thread to perform non-blocking SCP with progress updates."""
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(bool)
+
+    def __init__(self, video_path: str, json_path: str, ssh_key: str, pi_ip: str):
+        super().__init__()
+        self.video_path = video_path
+        self.json_path = json_path
+        self.ssh_key = ssh_key
+        self.pi_ip = pi_ip
+
+    def run(self):
+        import subprocess, shlex
+        # Emit indeterminate until we parse a percentage
+        self.progress.emit(-1)
+        cmd = f"scp -v -C -i {shlex.quote(self.ssh_key)} {shlex.quote(self.video_path)} {shlex.quote(self.json_path)} pi@{self.pi_ip}:/home/pi/upload_queue/"
+        p = subprocess.Popen(cmd, shell=True, stderr=subprocess.PIPE, universal_newlines=True)
+        for line in p.stderr:
+            if '%' in line:
+                try:
+                    perc = int(line.strip().split('%')[0])
+                    self.progress.emit(perc)
+                except:
+                    continue
+        p.wait()
+        success = (p.returncode == 0)
+        self.finished.emit(success)
+        # cleanup JSON file locally
+        try:
+            import os
+            os.remove(self.json_path)
+        except Exception:
+            pass
+
 class UserPanel(QWidget):
     """Panel for a single Upload-Post user: single uploads and scheduling."""
-    def __init__(self, api_key_edit: QLineEdit, parent=None):
+    def __init__(self, api_key_edit: QLineEdit, pi_ip_edit: QLineEdit, ssh_key_edit: QLineEdit, parent=None):
         super().__init__(parent)
         self.api_key_edit = api_key_edit
+        self.pi_ip_edit = pi_ip_edit
+        self.ssh_key_edit = ssh_key_edit
         self._build_ui()
 
     def _build_ui(self):
@@ -122,6 +204,9 @@ class UserPanel(QWidget):
         sched_layout.addWidget(self.select_folder_btn)
         self.scheduler_table = QTableWidget(0,4)
         self.scheduler_table.setHorizontalHeaderLabels(["Video","Caption","Time","Remaining"])
+        self.scheduler_table.setDragDropMode(QAbstractItemView.InternalMove)
+        self.scheduler_table.setDragDropOverwriteMode(False)
+        self.scheduler_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         sched_layout.addWidget(self.scheduler_table)
         self.schedule_status_lbl = QLabel("")
         sched_layout.addWidget(self.schedule_status_lbl)
@@ -133,6 +218,8 @@ class UserPanel(QWidget):
         row.addWidget(self.refresh_btn)
         row.addWidget(self.start_schedule_btn)
         sched_layout.addLayout(row)
+        self.run_on_pi_checkbox = QCheckBox("Run on Pi")
+        sched_layout.addWidget(self.run_on_pi_checkbox)
         self.scheduler_panel.setVisible(False)
         layout.addWidget(self.scheduler_panel)
 
@@ -302,11 +389,65 @@ class UserPanel(QWidget):
         # Update schedule status label and refresh time remaining
         self._refresh_schedule_status()
         self.schedule_status_lbl.setText("Videos scheduled for upload")
+        # If opted to run on Pi, send tasks via SCP and return
+        if self.run_on_pi_checkbox.isChecked():
+            for task in tasks:
+                try:
+                    self._send_to_pi(task["path"], task["caption"], username, task["scheduled_time"])
+                    self.status_lbl.setText(f"Queued {task['path'].name} on Pi ✓")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error sending to Pi", str(e))
+            return
         # Start scheduler worker
         self.scheduler_worker = SchedulerWorker(tasks, api_key, username)
         self.scheduler_worker.update_status.connect(lambda msg: self.status_lbl.setText(msg))
         self.scheduler_worker.finished_all.connect(lambda: QMessageBox.information(self, "Done", "All scheduled uploads complete."))
         self.scheduler_worker.start()
+
+    def _send_to_pi(self, video_path, caption, user, scheduled_time):
+        from pathlib import Path
+        import json
+        # Prepare task JSON file
+        task = {
+            "video": Path(video_path).name,
+            "caption": caption,
+            "user": user,
+            "scheduled_at": scheduled_time.isoformat()
+        }
+        tmp_json = Path(video_path).with_suffix(".task.json")
+        tmp_json.write_text(json.dumps(task))
+        pi_ip = self.pi_ip_edit.text().strip()
+        ssh_key = self.ssh_key_edit.text().strip()
+        # Show and reset progress bar
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        # Start SCP in background thread
+        self.scp_worker = SCPWorker(
+            video_path=str(video_path),
+            json_path=str(tmp_json),
+            ssh_key=ssh_key,
+            pi_ip=pi_ip,
+        )
+        # Connect progress to handle indeterminate and value updates
+        def _on_scp_progress(val: int):
+            if val < 0:
+                # Indeterminate mode
+                self.progress_bar.setRange(0, 0)
+            else:
+                # Ensure determinate mode
+                if self.progress_bar.maximum() == 0:
+                    self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(val)
+        self.scp_worker.progress.connect(_on_scp_progress)
+        def _on_scp_finished(success: bool):
+            self.progress_bar.setVisible(False)
+            from pathlib import Path as _P
+            if success:
+                self.status_lbl.setText(f"Queued {_P(video_path).name} on Pi ✓")
+            else:
+                QMessageBox.critical(self, "SCP Error", f"Failed to send {_P(video_path).name} to Pi.")
+        self.scp_worker.finished.connect(_on_scp_finished)
+        self.scp_worker.start()
 
 class MainWindow(QWidget):
     def __init__(self):
@@ -329,21 +470,53 @@ class MainWindow(QWidget):
         remove_user_btn = QPushButton("Remove User")
         remove_user_btn.clicked.connect(self._remove_user_panel)
         top_row.addWidget(remove_user_btn)
+        top_row.addWidget(QLabel("Pi IP"))
+        self.pi_ip_edit = QLineEdit()
+        self.pi_ip_edit.setText(ENV_PI_IP)
+        top_row.addWidget(self.pi_ip_edit)
+        top_row.addWidget(QLabel("SSH Key"))
+        self.ssh_key_edit = QLineEdit()
+        self.ssh_key_edit.setText(ENV_SSH_KEY)
+        top_row.addWidget(self.ssh_key_edit)
         main_layout.addLayout(top_row)
 
-        # Scroll area for multiple UserPanels
+        # Scroll area for multiple UserPanels wrapped in tabs
         self.panels_container = QWidget()
         self.panels_layout = QHBoxLayout(self.panels_container)
         scroll = QScrollArea()
         scroll.setWidget(self.panels_container)
         scroll.setWidgetResizable(True)
-        main_layout.addWidget(scroll)
+
+        # Tabs for Uploads and Pi Logs
+        self.tabs = QTabWidget()
+        # Uploads tab
+        upload_tab = QWidget()
+        upload_layout = QVBoxLayout(upload_tab)
+        upload_layout.addWidget(scroll)
+        self.tabs.addTab(upload_tab, "Uploads")
+
+        # Pi Logs tab
+        self.logs_tab = QWidget()
+        logs_layout = QVBoxLayout(self.logs_tab)
+        self.logs_refresh_btn = QPushButton("Refresh Logs")
+        self.logs_refresh_btn.clicked.connect(self.refresh_logs)
+        logs_layout.addWidget(self.logs_refresh_btn)
+        self.logs_table = QTableWidget(0,5)
+        self.logs_table.setHorizontalHeaderLabels(["Timestamp","Video","User","Status","Message"])
+        self.logs_table.horizontalHeader().setStretchLastSection(True)
+        logs_layout.addWidget(self.logs_table)
+        self.tabs.addTab(self.logs_tab, "Pi Logs")
+
+        main_layout.addWidget(self.tabs)
+
+        # Load logs when Pi Logs tab is selected
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # Add initial panel
         self._add_user_panel()
 
     def _add_user_panel(self):
-        panel = UserPanel(self.api_key_edit)
+        panel = UserPanel(self.api_key_edit, self.pi_ip_edit, self.ssh_key_edit)
         self.user_panels.append(panel)
         self.panels_layout.addWidget(panel)
         panel.show()
@@ -356,6 +529,44 @@ class MainWindow(QWidget):
         self.panels_layout.removeWidget(panel)
         panel.setParent(None)
         panel.deleteLater()
+
+    def refresh_logs(self):
+        pi_ip = self.pi_ip_edit.text().strip()
+        ssh_key = self.ssh_key_edit.text().strip()
+        self.logs_refresh_btn.setEnabled(False)
+        self.logs_table.setRowCount(0)
+        self.logs_worker = LogsWorker(pi_ip, ssh_key)
+        self.logs_worker.logs_ready.connect(self._populate_logs_table)
+        self.logs_worker.finished.connect(lambda: self.logs_refresh_btn.setEnabled(True))
+        self.logs_worker.start()
+
+    def _on_tab_changed(self, index):
+        if self.tabs.tabText(index) == "Pi Logs":
+            self.refresh_logs()
+
+    def _populate_logs_table(self, rows):
+        self.logs_table.setRowCount(len(rows))
+        for row_idx, row in enumerate(rows):
+            ts_item = QTableWidgetItem(row.get("timestamp", ""))
+            video_item = QTableWidgetItem(row.get("video", ""))
+            user_item = QTableWidgetItem(row.get("user", ""))
+            status_item = QTableWidgetItem(row.get("status", ""))
+            msg_item = QTableWidgetItem(row.get("message", ""))
+            self.logs_table.setItem(row_idx, 0, ts_item)
+            self.logs_table.setItem(row_idx, 1, video_item)
+            self.logs_table.setItem(row_idx, 2, user_item)
+            self.logs_table.setItem(row_idx, 3, status_item)
+            self.logs_table.setItem(row_idx, 4, msg_item)
+            # Color based on status
+            if row.get("status", "") == "ok":
+                color = Qt.green
+            elif row.get("status", "") == "error":
+                color = Qt.red
+            else:
+                color = None
+            if color:
+                for item in (ts_item, video_item, user_item, status_item, msg_item):
+                    item.setBackground(color)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
