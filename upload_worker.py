@@ -39,11 +39,24 @@ while True:
             success = False
             for attempt in range(1, 4):  # max 3 tries
                 try:
-                    API.upload_video(
+                    # Attempt upload and check for platform-level errors
+                    resp = API.upload_video(
                         video_path=str(video_path),
                         caption=task["caption"],
                         user=task["user"]
                     )
+                    # If API did not report top-level success, raise to retry
+                    if not resp.get("success"):
+                        raise RuntimeError(f"Upload-Post reported failure: {resp}")
+                    # Check per-platform responses
+                    errors = []
+                    for plat, plat_data in resp.get("results", {}).items():
+                        if not plat_data.get("success"):
+                            err = plat_data.get("error", "Unknown platform error")
+                            errors.append(f"{plat}: {err}")
+                    if errors:
+                        raise RuntimeError("; ".join(errors))
+                    # All platforms succeeded
                     success = True
                     log({**task, "status": "ok", "attempt": attempt, "timestamp": datetime.datetime.now().isoformat()})
                     break

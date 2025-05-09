@@ -78,7 +78,8 @@ class LogsWorker(QThread):
     def __init__(self, pi_ip: str, ssh_key: str):
         super().__init__()
         self.pi_ip = pi_ip
-        self.ssh_key = ssh_key
+        # Expand ~ in SSH key path to full home directory
+        self.ssh_key = str(Path(ssh_key).expanduser())
 
     def run(self):
         import subprocess, json
@@ -285,11 +286,23 @@ class UserPanel(QWidget):
                 platforms=None,  # default to TikTok
                 progress_callback=self._update_progress,
             )
-            if response.get("success"):
-                self.status_lbl.setText("✅ Upload successful!")
-            else:
+            # Check top-level success and per-platform results
+            if not response.get("success"):
                 self.status_lbl.setText("❌ Upload failed.")
                 QMessageBox.critical(self, "Upload Failed", str(response))
+            else:
+                # Inspect individual platform results
+                errors = []
+                results = response.get("results", {})
+                for plat, plat_data in results.items():
+                    if not plat_data.get("success"):
+                        err = plat_data.get("error", "Unknown platform error")
+                        errors.append(f"{plat}: {err}")
+                if errors:
+                    self.status_lbl.setText("❌ Upload failed.")
+                    QMessageBox.critical(self, "Upload Failed", "; ".join(errors))
+                else:
+                    self.status_lbl.setText("✅ Upload successful!")
         except Exception as ex:
             # Show status and a detailed error dialog
             self.status_lbl.setText("❌ Error")
@@ -417,7 +430,8 @@ class UserPanel(QWidget):
         tmp_json = Path(video_path).with_suffix(".task.json")
         tmp_json.write_text(json.dumps(task))
         pi_ip = self.pi_ip_edit.text().strip()
-        ssh_key = self.ssh_key_edit.text().strip()
+        # Expand ~ in SSH key path to full home directory
+        ssh_key = str(Path(self.ssh_key_edit.text().strip()).expanduser())
         # Show and reset progress bar
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
@@ -449,6 +463,55 @@ class UserPanel(QWidget):
         self.scp_worker.finished.connect(_on_scp_finished)
         self.scp_worker.start()
 
+class PiTestWorker(QThread):
+    """Worker thread to test SSH connection to Pi."""
+    test_result = pyqtSignal(bool, str)
+
+    def __init__(self, pi_ip: str, ssh_key: str):
+        super().__init__()
+        self.pi_ip = pi_ip
+        # Expand ~ in SSH key path
+        self.ssh_key = str(Path(ssh_key).expanduser())
+
+    def run(self):
+        import subprocess, shlex, json
+        from pathlib import Path
+        from datetime import datetime
+        # Build SSH command
+        cmd = f"ssh -o BatchMode=yes -i {shlex.quote(self.ssh_key)} pi@{self.pi_ip} echo ok"
+        success = False
+        message = ""
+        try:
+            output = subprocess.check_output(
+                cmd, shell=True, stderr=subprocess.STDOUT,
+                universal_newlines=True, timeout=10
+            )
+            if output.strip() == "ok":
+                success = True
+                message = "Connection successful"
+            else:
+                message = f"Unexpected response: {output.strip()}"
+        except subprocess.CalledProcessError as e:
+            message = f"SSH error {e.returncode}: {e.output.strip()}"
+        except subprocess.TimeoutExpired:
+            message = "SSH timed out"
+        except Exception as e:
+            message = f"{type(e).__name__}: {str(e)}"
+        # Log the test result to logs/pi_test.log
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "pi_ip": self.pi_ip,
+            "ssh_key": self.ssh_key,
+            "success": success,
+            "message": message,
+        }
+        with (log_dir / "pi_test.log").open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(log_entry) + "\n")
+        # Emit result for UI
+        self.test_result.emit(success, message)
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -463,6 +526,8 @@ class MainWindow(QWidget):
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Upload-Post API Key"))
         self.api_key_edit = QLineEdit()
+        # Prefill API key from environment
+        self.api_key_edit.setText(ENV_API_KEY)
         top_row.addWidget(self.api_key_edit)
         add_user_btn = QPushButton("Add User")
         add_user_btn.clicked.connect(self._add_user_panel)
@@ -478,6 +543,10 @@ class MainWindow(QWidget):
         self.ssh_key_edit = QLineEdit()
         self.ssh_key_edit.setText(ENV_SSH_KEY)
         top_row.addWidget(self.ssh_key_edit)
+        # Test Pi connection button
+        self.test_pi_btn = QPushButton("Test Pi Connection")
+        self.test_pi_btn.clicked.connect(self._test_pi_connection)
+        top_row.addWidget(self.test_pi_btn)
         main_layout.addLayout(top_row)
 
         # Scroll area for multiple UserPanels wrapped in tabs
@@ -567,6 +636,27 @@ class MainWindow(QWidget):
             if color:
                 for item in (ts_item, video_item, user_item, status_item, msg_item):
                     item.setBackground(color)
+
+    def _test_pi_connection(self):
+        pi_ip = self.pi_ip_edit.text().strip()
+        ssh_key_raw = self.ssh_key_edit.text().strip()
+        # Expand and validate SSH key path
+        ssh_path = Path(ssh_key_raw).expanduser()
+        if not ssh_path.exists():
+            QMessageBox.warning(self, "Invalid SSH Key", f"SSH key not found at {ssh_path}")
+            return
+        self.test_pi_btn.setEnabled(False)
+        # Start test worker
+        self.pi_test_worker = PiTestWorker(pi_ip, str(ssh_path))
+        self.pi_test_worker.test_result.connect(self._on_test_result)
+        self.pi_test_worker.finished.connect(lambda: self.test_pi_btn.setEnabled(True))
+        self.pi_test_worker.start()
+
+    def _on_test_result(self, success: bool, message: str):
+        if success:
+            QMessageBox.information(self, "Pi Connection", message)
+        else:
+            QMessageBox.critical(self, "Pi Connection", f"Failed to connect: {message}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
