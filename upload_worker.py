@@ -6,10 +6,16 @@ import pathlib
 import datetime
 import traceback
 from uploader import UploadPostClient
+from dotenv import load_dotenv
+import os
+
+# Load API key from .env
+load_dotenv()
+API_KEY = os.getenv("API_KEY", "")
+API = UploadPostClient(API_KEY)
 
 QUEUE_DIR = pathlib.Path("/home/pi/upload_queue")
 LOG_FILE = pathlib.Path("/home/pi/upload_logs/worker_log.jsonl")
-API = UploadPostClient()  # reads API_KEY from ~/.env
 SLEEP_SEC = 30
 
 
