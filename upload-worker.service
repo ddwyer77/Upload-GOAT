@@ -6,7 +6,7 @@ After=network-online.target
 User=pi
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/pi
-ExecStart=/home/pi/uploader-env/bin/python /home/pi/upload_worker.py
+ExecStart=/home/pi/uploader-env/bin/python /home/pi/Upload-GOAT/upload_worker.py
 Restart=always
 
 [Install]
